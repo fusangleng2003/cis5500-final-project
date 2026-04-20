@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "create-react-app",
+  "buildCommand": "npm run build",
+  "outputDirectory": "build",
+  "installCommand": "npm install",
+  "env": {
+    "REACT_APP_API_BASE_URL": "https://boardgame-explorer-api.onrender.com"
+  }
+}

@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: boardgame-explorer-api
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: PGHOST
+        sync: false
+      - key: PGPORT
+        value: "5432"
+      - key: PGUSER
+        sync: false
+      - key: PGPASSWORD
+        sync: false
+      - key: PGDATABASE
+        sync: false
+      - key: PGSSL
+        value: "true"
+      - key: PGPOOL_MAX
+        value: "10"
+      - key: CACHE_MAX
+        value: "500"
+      - key: CACHE_TTL_MS
+        value: "300000"

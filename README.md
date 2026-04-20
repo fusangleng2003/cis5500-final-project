@@ -33,9 +33,44 @@ Temporary raw tables used for data loading:
 - Review dataset: Kaggle BoardGameGeek reviews dataset
 
 ## How to Run
-1. Connect to the PostgreSQL database on AWS RDS.
-2. Run the SQL scripts in the `sql/` folder to create tables and load data.
-3. Run the backend and frontend locally for application development.
+
+### 1. Database (one-time, per team DB)
+```
+psql $DATABASE_URL -f sql/schema.sql
+psql $DATABASE_URL -f sql/load_game.sql
+psql $DATABASE_URL -f sql/load_review.sql
+psql $DATABASE_URL -f sql/indexes.sql   # pg_trgm + supporting indexes (M4)
+```
+
+### 2. Backend (Node/Express API — 13 routes)
+```
+cd backend
+cp .env.example .env    # fill in RDS credentials
+npm install
+npm run dev             # http://localhost:8080/api/health
+```
+Key routes (see `CIS5500_Milestone4.md` for full spec):
+`/api/games/search`, `/api/games/top`, `/api/games/most-reviewed`,
+`/api/games/:gameId`, `/api/games/:gameId/reviews`, `/api/games/:gameId/rating-distribution`,
+`/api/games/:gameId/similar`, `/api/games/highly-rated`,
+`/api/games/outperformers-by-year`, `/api/games/review-vs-stored-rating`,
+`/api/games/dormant-top-rated`, `/api/games/global-outperformers`, `/api/health`.
+
+### 3. Frontend (React)
+```
+cd frontend
+npm install
+npm start
+```
+
+## Deployment
+- **Backend** → Render (`backend/render.yaml` blueprint). Free tier web service, `/api/health` used as healthcheck.
+- **Frontend** → Vercel (`frontend/vercel.json`). Set `REACT_APP_API_BASE_URL` to the Render URL.
+- **Database** → AWS RDS Postgres (shared with team).
+
+## Optimization (M4)
+- **Indexes**: `sql/indexes.sql` adds a GIN `pg_trgm` index on `Game.name` (fuzzy + ILIKE search) plus B-tree indexes on the columns used by the complex queries (Q7–Q10 → R9–R12).
+- **LRU cache**: `backend/cache.js` wraps every read route with an in-process `lru-cache` (500 entries, 5-min TTL) keyed on query params. First-hit latency pays the SQL cost, subsequent hits serve from memory.
 
 ## Notes
 This repository is private and intended only for the CIS 5500 final project team and course staff.v

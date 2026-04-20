@@ -17,16 +17,16 @@ SELECT
     x.textfield_comment_value,
     CASE
         WHEN x.textfield_comment_tstamp IS NULL OR TRIM(x.textfield_comment_tstamp) = '' THEN NULL
-        ELSE TO_TIMESTAMP(x.textfield_comment_tstamp, 'YYYY/MM/DD HH24:MI')
+        ELSE TO_TIMESTAMP(x.textfield_comment_tstamp, 'YYYY-MM-DD HH24:MI:SS')
     END,
     x.rating,
     CASE
         WHEN x.rating_tstamp IS NULL OR TRIM(x.rating_tstamp) = '' THEN NULL
-        ELSE TO_TIMESTAMP(x.rating_tstamp, 'YYYY/MM/DD HH24:MI')
+        ELSE TO_TIMESTAMP(x.rating_tstamp, 'YYYY-MM-DD HH24:MI:SS')
     END,
     CASE
         WHEN x.postdate IS NULL OR TRIM(x.postdate) = '' THEN NULL
-        ELSE TO_DATE(x.postdate, 'YYYY/MM/DD')
+        ELSE TO_DATE(SUBSTRING(x.postdate FROM 1 FOR 10), 'YYYY-MM-DD')
     END
 FROM (
     SELECT DISTINCT ON (r.reviewid)
