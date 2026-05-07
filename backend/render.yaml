@@ -28,4 +28,4 @@ services:
       - key: CACHE_MAX
         value: "500"
       - key: CACHE_TTL_MS
-        value: "300000"
+        value: "86400000"

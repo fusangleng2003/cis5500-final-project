@@ -16,14 +16,15 @@ data-driven insights powered by four "complex" SQL queries.
 React + Vite (Vercel)  ──HTTPS──▶  Express API (Render, Node 20)  ──pg──▶  PostgreSQL (AWS RDS)
                                               │
                                               ▼
-                                        lru-cache (in-process, 5 min TTL)
+                                        lru-cache (in-process, 24 h TTL)
 ```
 
 - `frontend/` — React 18 + Vite SPA with five pages (Home, Search,
   Game Detail, Insights, About).
 - `backend/` — Node.js + Express API, 13 read-only routes, LRU-cached.
-- `sql/` — schema, load scripts, indexes, the 10 queries (Q1–Q10), and a
-  performance-eval harness for the 4 complex queries.
+- `sql/` — schema, load scripts, materialized review stats, indexes, the
+  10 queries (Q1–Q10), and a performance-eval harness for the 4 complex
+  queries.
 - `docs/` — final report and supporting documents.
 
 ## Documents
@@ -34,7 +35,7 @@ React + Vite (Vercel)  ──HTTPS──▶  Express API (Render, Node 20)  ─�
 | [`docs/api.md`](docs/api.md)                               | All 13 routes: paths, params, response shape, examples.         |
 | [`docs/er_diagram.md`](docs/er_diagram.md)                 | Mermaid ER diagram + cardinalities + design rationale.          |
 | [`docs/normalization.md`](docs/normalization.md)           | 3NF / BCNF proof for `Game` and `Review`.                       |
-| [`docs/performance.md`](docs/performance.md)               | M4 perf evaluation: indexing + query restructuring + caching.   |
+| [`docs/performance.md`](docs/performance.md)               | Perf evaluation: indexing + materialization + caching.          |
 
 ## How to run
 
@@ -49,6 +50,7 @@ psql $DATABASE_URL -f sql/schema.sql
 #   \copy raw_reviews_csv    FROM 'boardgames_reviews.csv' WITH CSV HEADER
 psql $DATABASE_URL -f sql/load_game.sql
 psql $DATABASE_URL -f sql/load_review.sql
+psql $DATABASE_URL -f sql/materialized_views.sql
 psql $DATABASE_URL -f sql/indexes.sql
 ```
 
@@ -77,7 +79,7 @@ Vercel is wired up for that exact pipeline via `frontend/vercel.json`.
 
 | Component | Provider | Config file                                     |
 | --------- | -------- | ----------------------------------------------- |
-| Database  | AWS RDS  | `sql/schema.sql` + `sql/indexes.sql`            |
+| Database  | AWS RDS  | `sql/schema.sql` + `sql/materialized_views.sql` + `sql/indexes.sql` |
 | Backend   | Render   | [`backend/render.yaml`](backend/render.yaml)    |
 | Frontend  | Vercel   | [`frontend/vercel.json`](frontend/vercel.json)  |
 
@@ -85,16 +87,19 @@ Health check: `GET /api/health` returns `{ "status": "ok", "db": "up" }`
 when both Render and RDS are reachable. Render uses this path as its
 upstream health probe.
 
-## Key design choices (M4)
+## Key design choices
 
 - **Indexes** ([`sql/indexes.sql`](sql/indexes.sql)): partial B-trees on the
   high-selectivity columns plus a `pg_trgm` GIN index on `Game.name` for
   fuzzy + ILIKE search.
+- **Materialized review stats** ([`sql/materialized_views.sql`](sql/materialized_views.sql)):
+  precomputes one row per game for Q8..Q10, avoiding repeated full
+  aggregations over the 29.6 M-row `Review` table.
 - **Application cache** ([`backend/cache.js`](backend/cache.js)): LRU
-  (`lru-cache` v10), 500 entries, 5-min TTL, keyed on route + query
+  (`lru-cache` v10), 500 entries, 24 h TTL, keyed on route + query
   params. Repeats never reach Postgres.
-- **Query restructuring**: Q10 uses two CTEs so global stats are computed
-  once per request rather than once per row.
+- **Query restructuring**: Q7 uses a `year_stats` CTE; Q8..Q10 use
+  `game_review_stats` for interactive cold performance.
 
 ## Repository tour
 
@@ -111,7 +116,8 @@ sql/schema.sql       # canonical schema (Game, Review, raw_*)
 sql/load_game.sql    # raw → Game with dedup
 sql/load_review.sql  # raw → Review with FK enforcement
 sql/queries.sql      # Q1..Q10 (with Q7..Q10 marked complex)
-sql/indexes.sql      # M4 indexes
+sql/materialized_views.sql # per-game review summary for Q8..Q10
+sql/indexes.sql      # indexes
 sql/perf_eval.sql    # EXPLAIN + \timing harness for Q7..Q10
 
 docs/                # FINAL_REPORT.md and supporting docs

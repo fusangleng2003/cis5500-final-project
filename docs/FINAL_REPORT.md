@@ -48,9 +48,11 @@ React + Vite (Vercel)  ──HTTPS──▶  Express API (Render, Node 20)  ─�
 ```
 
 - **Database** — PostgreSQL on AWS RDS (`db.t3.micro`). Two business tables
-  (`Game`, `Review`) and two raw staging tables; B-tree + `pg_trgm` GIN
+  (`Game`, `Review`), two raw staging tables, and one materialized
+  per-game review summary (`game_review_stats`); B-tree + `pg_trgm` GIN
   indexes on the columns used by the slow queries. Schema in
-  [`sql/schema.sql`](../sql/schema.sql), indexes in
+  [`sql/schema.sql`](../sql/schema.sql), summary view in
+  [`sql/materialized_views.sql`](../sql/materialized_views.sql), indexes in
   [`sql/indexes.sql`](../sql/indexes.sql).
 - **Backend** — Node.js 20 + Express. 13 read-only routes, all queries go
   through a connection pool (`pg`) and an LRU cache.
@@ -155,26 +157,27 @@ each is wired to a corresponding API route (see `docs/api.md`).
 | Q4  | Recent reviews for a game            | R5                 |
 | Q5  | Rating distribution                  | R6                 |
 | Q6  | Highly-rated with N+ reviews         | R7                 |
-| Q7  | **Outperformers within release year** (correlated subquery) | R9 |
-| Q8  | **Reviews exceed stored rating** (HAVING + AVG)              | R10 |
-| Q9  | **Dormant top-rated** (NOT EXISTS antijoin)                  | R11 |
-| Q10 | **Beats global average on both axes** (multi-CTE)            | R12 |
+| Q7  | **Outperformers within release year** (year-level aggregate CTE) | R9 |
+| Q8  | **Reviews exceed stored rating** (materialized review summary + join) | R10 |
+| Q9  | **Dormant top-rated** (materialized review summary + date filter)     | R11 |
+| Q10 | **Beats global average on both axes** (summary + global-stats CTE)    | R12 |
 
 The four bolded queries are the M4 complex queries. Each one combines
 multiple SQL features that a naïve single-table query cannot express:
 
-- **Q7** uses two correlated subqueries against a re-aliased `Game`,
-  computing a per-year "average voters" and "average rating" and
-  selecting rows that exceed both.
-- **Q8** joins `Game ⋈ Review`, aggregates per game, and uses `HAVING
-  AVG(r.rating) > g.avg_rating` — a comparison between an aggregate and
-  a grouped column.
-- **Q9** uses `JOIN + GROUP BY + HAVING` plus a correlated `NOT EXISTS`
-  subquery against a date predicate, encoding "no row exists since
-  2024-01-01" as an antijoin.
-- **Q10** computes a CTE of per-game stats, a second CTE of global
-  averages over the first CTE, and joins them to filter games that beat
-  both global means.
+- **Q7** originally used two correlated subqueries against `Game`. We
+  rewrote it into a `year_stats` CTE that computes each year's average
+  voters and average rating once, then joins that small per-year table
+  back to `Game`. This preserves the same idea while avoiding repeated
+  per-row aggregation.
+- **Q8** reads `game_review_stats`, the materialized one-row-per-game
+  review summary, and joins it to `Game` to compare the review average
+  against the stored BGG average.
+- **Q9** uses the same materialized summary to find high-rated games
+  whose precomputed `latest_post_date` is before `2024-01-01`.
+- **Q10** computes global averages over `game_review_stats`, then joins
+  qualifying games to `Game`. This keeps the query complex while
+  avoiding a fresh aggregation over all review rows.
 
 ## 8. API specification
 
@@ -213,7 +216,7 @@ The whole frontend is one React SPA (`react-router-dom` v6). Styling is
 hand-rolled CSS with a small design system (cards, badges, table, dist
 bars) — no UI framework dependency.
 
-## 10. Performance evaluation (M4)
+## 10. Performance evaluation
 
 Method, environment, and full numbers in
 [`docs/performance.md`](./performance.md). Pipeline:
@@ -222,24 +225,39 @@ Method, environment, and full numbers in
    `sql/perf_eval.sql`.
 2. Apply `sql/indexes.sql`, re-run `perf_eval.sql` for the **indexed**
    numbers.
-3. Hit each of R9..R12 twice via `curl -w '%{time_total}\n'` for
+3. Rewrite Q7-Q10 and re-run `perf_eval.sql` to isolate pure query
+   restructuring effects.
+4. Build `game_review_stats` with
+   [`sql/materialized_views.sql`](../sql/materialized_views.sql) and
+   re-run `perf_eval.sql` for the final database-side timings.
+5. Hit each of R9..R12 twice via `curl -w '%{time_total}\n'` for
    **cache cold/warm**.
 
 Headline result on **126,266 `Game` rows + 29,592,656 `Review` rows**
 (RDS `db.t3.micro`), captured in M5 with the indexes in
-[`sql/indexes.sql`](../sql/indexes.sql) applied. M4 cold timings (on
-the 9.28 M-row sample) are shown in parentheses for comparison:
+[`sql/indexes.sql`](../sql/indexes.sql) applied. After the initial M5
+measurement, we rewrote Q7-Q10 to test whether query restructuring
+could reduce cold database time beyond indexing and caching. That
+helped Q7 substantially but left Q8-Q10 in the 30 s range, so we added
+`game_review_stats`, a materialized view with one precomputed row per
+game. The table below reports the latest `EXPLAIN ANALYZE` / timed-run
+results from [`sql/perf_eval.sql`](../sql/perf_eval.sql):
 
-| Query | Cold (DB hit, M5)  | Warm (LRU hit) | Speed-up      |
-| ----- | -----------------: | -------------: | ------------: |
-| Q7    |  4.1 s (2.1 s, M4) |     <5 ms      | **~800×**     |
-| Q8    |  37 s  (9.0 s, M4) |     <5 ms      | **~7,400×**   |
-| Q9    |  55 s  (11.8 s, M4)|     <5 ms      | **~11,000×**  |
-| Q10   |  37 s  (9.5 s, M4) |     <5 ms      | **~7,400×**   |
+| Query | Final optimization | Latest DB timing | Previous DB timing | Warm LRU hit |
+| ----- | ------------------ | ----------------: | -----------------: | -----------: |
+| Q7    | `year_stats` CTE avoids repeated per-year aggregation | **0.94 s EXPLAIN**, 178-243 ms warm DB runs | 4.1 s | <5 ms |
+| Q8    | Query `game_review_stats` instead of aggregating `Review` | **120 ms EXPLAIN**, 54-71 ms warm DB runs | 29.9 s | <5 ms |
+| Q9    | Query `game_review_stats.latest_post_date` for dormancy | **264 ms EXPLAIN**, 65-152 ms warm DB runs | 34.6 s | <5 ms |
+| Q10   | Global averages over `game_review_stats` | **151 ms EXPLAIN**, 133-619 ms warm DB runs | 30.5 s | <5 ms |
 
-Cold latency grew with the dataset (≈ 3.2× more `Review` rows ⇒ a
-roughly proportional rise in the full-Review-scan queries), while
-warm latency is invariant — which is the value the cache adds.
+The main lesson is that query restructuring and materialization solve
+different problems. Q7 became fast by removing repeated work over the
+smaller `Game` table. Q8-Q10 needed a stronger move: precomputing
+`Review` aggregates once after ingestion. `game_review_stats` has
+102,983 rows, compared with 29.6 M rows in `Review`, so the final
+queries operate on the scale of games rather than the scale of
+individual reviews. The LRU cache still makes repeated user
+interactions sub-5 ms, but the cold path is now interactive too.
 
 Four optimization techniques used:
 
@@ -249,22 +267,33 @@ Four optimization techniques used:
    partial B-tree on `Review.post_date`; GIN `pg_trgm` on `Game.name` for
    fuzzy/ILIKE search.
 2. **Query restructuring**:
-   - **Q10** uses two CTEs so the global stats are computed once per
-     request rather than once per row; **Q7** uses correlated
-     subqueries against the same indexed column to avoid materializing
-     a per-year lookup table.
+   - **Q7** replaced two correlated year-level aggregate subqueries
+     with a single `year_stats` CTE, reducing repeated work on `Game`.
+   - In the intermediate Q8/Q10 rewrites, we aggregated `Review`
+     before joining to `Game`; for Q9, we split high-rated review
+     aggregates from recent activity and combined them with a left
+     anti-join. These experiments clarified the bottleneck: even a
+     cleaner plan was still paying for a full per-game review
+     aggregation.
+3. **Materialized review summary**:
+   [`sql/materialized_views.sql`](../sql/materialized_views.sql) creates
+   `game_review_stats(game_id, total_reviews, rated_reviews,
+   avg_review_rating, latest_post_date)`. Because the dataset is
+   read-only, we build this once after `load_review.sql`. Q8-Q10 now
+   read that 102,983-row summary instead of recomputing the same
+   aggregate over 29.6 M reviews on every cold request.
+4. **Targeted route fix**:
    - **R5 (M5)**: tightening the predicate to `WHERE post_date IS NOT
      NULL` and dropping `ORDER BY ... NULLS LAST` aligned the query
      with the index's native ordering, switching the planner from a
      Bitmap Heap Scan + top-N sort to a single Index Scan.
      **10.2 s → 31 ms (~320×)** on game `224517`. EXPLAIN ANALYZE
      before/after is in [`docs/performance.md`](./performance.md).
-3. **Application-layer cache** ([`backend/cache.js`](../backend/cache.js)):
+5. **Application-layer cache** ([`backend/cache.js`](../backend/cache.js)):
    `lru-cache` v10, `max=500`, `ttl=24 h` (M5 — bumped from 5 min
-   because the underlying data is read-only and the complex queries
-   cost 30–60 s cold on the M5 dataset). Keyed on route id + query
+   because the underlying data is read-only). Keyed on route id + query
    params. Repeat hits never reach Postgres.
-4. **Pool-level safeguards (M5)** — [`backend/db.js`](../backend/db.js)
+6. **Pool-level safeguards (M5)** — [`backend/db.js`](../backend/db.js)
    sets `statement_timeout = 240 s` and `query_timeout = 250 s` on
    every `pg` pool connection so a runaway query is aborted by
    Postgres and the connection is recycled instead of permanently
@@ -287,11 +316,13 @@ Health checks: Render uses `/api/health` as its upstream health probe.
    29.6 M-row export. We keep raw rows in staging just long enough to
    do the inserts, then truncate. The expensive aggregations (Q3, Q5,
    Q8, Q9, Q10) are accelerated with composite indexes on
-   `Review(game_id, …)`; cold latency on the bigger M5 dataset is
-   30–60 s for the four complex routes, so we additionally raised the
-   `pg` pool's `statement_timeout` to 240 s (with a matching node-side
-   `query_timeout` of 250 s) to keep slow paths from permanently
-   parking a pool slot.
+   `Review(game_id, …)`. We then added the `game_review_stats`
+   materialized view for the three Review-heavy complex routes
+   (Q8-Q10), which brought their cold database timings down from
+   roughly 30-35 s to 120-264 ms. We still keep the `pg` pool's
+   `statement_timeout` at 240 s (with a matching node-side
+   `query_timeout` of 250 s) so unexpected slow paths cannot
+   permanently park a pool slot.
 2. **Schema simplification from M2.** Our M2 proposal designed a richer
    9-table schema with `Category`, `Mechanic`, `Designer`, `Publisher`,
    and junction tables. The Kaggle dataset that was actually feasible
@@ -308,11 +339,15 @@ Health checks: Render uses `/api/health` as its upstream health probe.
    and the frontend renders them as "—". This is documented in the
    schema and the ER diagram so a future iteration can pull those
    fields from the BGG XML API without any schema change.
-4. **Slow correlated subqueries on year.** Q7 was the worst offender
-   on the baseline pass. The fix was a partial B-tree on
-   `Game.year_published WHERE year_published IS NOT NULL` so each
-   inner `AVG(...) WHERE year_published = ?` becomes a small
-   bitmap-index scan instead of a full table scan.
+4. **Separating useful query rewrites from real bottlenecks.** We
+   rewrote Q7-Q10 late in the project and re-ran `EXPLAIN ANALYZE`
+   rather than assuming CTEs would automatically be faster. Q7 improved
+   substantially because the rewrite removed repeated aggregation over
+   `Game`. Q8-Q10 improved only modestly because the dominant cost is a
+   full aggregation over the 29.6 M-row `Review` table. That observation
+   led directly to the `game_review_stats` materialized view, which
+   makes the final Q8-Q10 queries operate on one row per game instead of
+   one row per review.
 5. **Frontend isolation from API URL.** We use
    `import.meta.env.VITE_API_BASE_URL` so the same `npm run build`
    artifact deploys to local, staging, and production by changing one
