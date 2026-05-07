@@ -64,26 +64,28 @@ CREATE TABLE Review (
 -- COPY ... FROM 'boardgames.csv' / 'boardgames_reviews.csv' works
 -- without column-list rewrites. Truncate after load_*.sql succeeds.
 -- ---------------------------------------------------------------------
+-- All columns TEXT — the CSV uses "" for missing numerics, which breaks
+-- typed inserts. We cast in load_game.sql via NULLIF + ::INT/::FLOAT.
 CREATE TABLE raw_boardgames_csv (
-    rank        INT,
-    game_id     INT,
+    rank        TEXT,
+    game_id     TEXT,
     title       TEXT,
     description TEXT,
-    year        INT,
-    geekrating  FLOAT,
-    avgrating   FLOAT,
-    voters      INT,
+    year        TEXT,
+    geekrating  TEXT,
+    avgrating   TEXT,
+    voters      TEXT,
     link        TEXT,
     thumbnail   TEXT
 );
 
 CREATE TABLE raw_reviews_csv (
-    game_id                 INT,
-    reviewid                BIGINT,
-    user_pseudouserid       TEXT,
-    textfield_comment_value TEXT,
+    game_id                  TEXT,
+    reviewid                 TEXT,
+    user_pseudouserid        TEXT,
+    textfield_comment_value  TEXT,
     textfield_comment_tstamp TEXT,
-    rating                  FLOAT,
-    rating_tstamp           TEXT,
-    postdate                TEXT
+    rating                   TEXT,
+    rating_tstamp            TEXT,
+    postdate                 TEXT
 );

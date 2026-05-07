@@ -375,8 +375,8 @@ app.get('/api/games/:gameId/reviews', async (req, res) => {
       const { rows } = await pool.query(
         `SELECT review_id, user_id, rating, comment, post_date
          FROM Review
-         WHERE game_id = $1
-         ORDER BY post_date DESC NULLS LAST
+         WHERE game_id = $1 AND post_date IS NOT NULL
+         ORDER BY post_date DESC
          LIMIT $2`,
         [gameId, limit],
       );

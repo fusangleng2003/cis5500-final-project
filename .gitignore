@@ -19,9 +19,13 @@ npm-debug.log*
 # Editor
 .vscode/
 .idea/
+.claude/
 
 # Course-issued reference materials (do not redistribute)
 files/
+
+# Raw datasets (large, fetched separately)
+data/
 
 # Performance evaluation outputs (run-specific)
 docs/perf_baseline.txt

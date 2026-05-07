@@ -44,7 +44,7 @@ analytical insights rather than a long catalog.
 React + Vite (Vercel)  ──HTTPS──▶  Express API (Render, Node 20)  ──pg──▶  PostgreSQL (AWS RDS)
                                               │
                                               ▼
-                                        lru-cache (in-process, 5 min TTL)
+                                       lru-cache (in-process, 24 h TTL)
 ```
 
 - **Database** — PostgreSQL on AWS RDS (`db.t3.micro`). Two business tables
@@ -69,7 +69,9 @@ React + Vite (Vercel)  ──HTTPS──▶  Express API (Render, Node 20)  ─�
 After load:
 
 - `Game`: **126,266 rows**
-- `Review`: **9,281,852 rows** (~1.5 GB CSV)
+- `Review`: **29,592,656 rows** (M5 reload — the M4 measurements
+  earlier in this repo were taken on a 9.28 M-row sample of the same
+  source)
 
 Original Kaggle URLs are listed in the project proposal (Datasets 1, 2,
 and 3).
@@ -223,31 +225,50 @@ Method, environment, and full numbers in
 3. Hit each of R9..R12 twice via `curl -w '%{time_total}\n'` for
    **cache cold/warm**.
 
-Headline result on **126,266 `Game` rows + 9,281,852 `Review` rows** (RDS
-`db.t3.micro`), captured in M4 with the indexes in
-[`sql/indexes.sql`](../sql/indexes.sql) applied:
+Headline result on **126,266 `Game` rows + 29,592,656 `Review` rows**
+(RDS `db.t3.micro`), captured in M5 with the indexes in
+[`sql/indexes.sql`](../sql/indexes.sql) applied. M4 cold timings (on
+the 9.28 M-row sample) are shown in parentheses for comparison:
 
-| Query | Cold (DB hit) | Warm (LRU hit) | Speed-up   |
-| ----- | ------------: | -------------: | ---------: |
-| Q7    |       2.1 s   |     <5 ms      | **>400×**   |
-| Q8    |       9.0 s   |     **15 ms**  | **~600×**   |
-| Q9    |       11.8 s  |     <5 ms      | **>2,300×** |
-| Q10   |       9.5 s   |     <5 ms      | **>1,900×** |
+| Query | Cold (DB hit, M5)  | Warm (LRU hit) | Speed-up      |
+| ----- | -----------------: | -------------: | ------------: |
+| Q7    |  4.1 s (2.1 s, M4) |     <5 ms      | **~800×**     |
+| Q8    |  37 s  (9.0 s, M4) |     <5 ms      | **~7,400×**   |
+| Q9    |  55 s  (11.8 s, M4)|     <5 ms      | **~11,000×**  |
+| Q10   |  37 s  (9.5 s, M4) |     <5 ms      | **~7,400×**   |
 
-Three optimization techniques used:
+Cold latency grew with the dataset (≈ 3.2× more `Review` rows ⇒ a
+roughly proportional rise in the full-Review-scan queries), while
+warm latency is invariant — which is the value the cache adds.
+
+Four optimization techniques used:
 
 1. **Indexing** (`sql/indexes.sql`): partial B-tree on
    `Game.year_published`, `Game.avg_rating`, `Game.num_voters`; composite
    on `Review(game_id, post_date DESC)` and `Review(game_id, rating)`;
    partial B-tree on `Review.post_date`; GIN `pg_trgm` on `Game.name` for
    fuzzy/ILIKE search.
-2. **Query restructuring** — Q10 uses two CTEs so the global stats are
-   computed once per request rather than once per row; Q7 uses correlated
-   subqueries against the same indexed column to avoid materializing a
-   per-year lookup table.
+2. **Query restructuring**:
+   - **Q10** uses two CTEs so the global stats are computed once per
+     request rather than once per row; **Q7** uses correlated
+     subqueries against the same indexed column to avoid materializing
+     a per-year lookup table.
+   - **R5 (M5)**: tightening the predicate to `WHERE post_date IS NOT
+     NULL` and dropping `ORDER BY ... NULLS LAST` aligned the query
+     with the index's native ordering, switching the planner from a
+     Bitmap Heap Scan + top-N sort to a single Index Scan.
+     **10.2 s → 31 ms (~320×)** on game `224517`. EXPLAIN ANALYZE
+     before/after is in [`docs/performance.md`](./performance.md).
 3. **Application-layer cache** ([`backend/cache.js`](../backend/cache.js)):
-   `lru-cache` v10, `max=500`, `ttl=5 min`, keyed on route id + query
+   `lru-cache` v10, `max=500`, `ttl=24 h` (M5 — bumped from 5 min
+   because the underlying data is read-only and the complex queries
+   cost 30–60 s cold on the M5 dataset). Keyed on route id + query
    params. Repeat hits never reach Postgres.
+4. **Pool-level safeguards (M5)** — [`backend/db.js`](../backend/db.js)
+   sets `statement_timeout = 240 s` and `query_timeout = 250 s` on
+   every `pg` pool connection so a runaway query is aborted by
+   Postgres and the connection is recycled instead of permanently
+   tying up one of the 10 pool slots.
 
 ## 11. Deployment
 
@@ -261,12 +282,16 @@ Health checks: Render uses `/api/health` as its upstream health probe.
 
 ## 12. Technical challenges
 
-1. **Review CSV size.** The reviews export is ~1.5 GB and ~9.3 M rows.
-   We keep it in raw staging just long enough to do the inserts, then
-   truncate. The expensive aggregations (Q3, Q5, Q8, Q9, Q10) are
-   accelerated with composite indexes on `Review(game_id, …)` so we can
-   stay on RDS `db.t3.micro` without the queries timing out — see the
-   per-query analysis in `docs/performance.md`.
+1. **Review CSV size.** The reviews export grew across milestones —
+   M4 was measured on a 9.28 M-row sample; the M5 reload uses the full
+   29.6 M-row export. We keep raw rows in staging just long enough to
+   do the inserts, then truncate. The expensive aggregations (Q3, Q5,
+   Q8, Q9, Q10) are accelerated with composite indexes on
+   `Review(game_id, …)`; cold latency on the bigger M5 dataset is
+   30–60 s for the four complex routes, so we additionally raised the
+   `pg` pool's `statement_timeout` to 240 s (with a matching node-side
+   `query_timeout` of 250 s) to keep slow paths from permanently
+   parking a pool slot.
 2. **Schema simplification from M2.** Our M2 proposal designed a richer
    9-table schema with `Category`, `Mechanic`, `Designer`, `Publisher`,
    and junction tables. The Kaggle dataset that was actually feasible

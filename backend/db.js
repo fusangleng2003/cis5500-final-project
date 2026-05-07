@@ -11,6 +11,8 @@ const pool = new Pool({
   max: Number(process.env.PGPOOL_MAX || 10),
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 10_000,
+  statement_timeout: Number(process.env.PG_STATEMENT_TIMEOUT_MS || 240_000),
+  query_timeout: Number(process.env.PG_QUERY_TIMEOUT_MS || 250_000),
   ssl: useSSL ? { rejectUnauthorized: false } : false,
 });
 
