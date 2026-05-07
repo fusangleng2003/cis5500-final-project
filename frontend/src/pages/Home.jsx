@@ -12,20 +12,32 @@ export default function Home() {
 
   useEffect(() => {
     let alive = true;
-    Promise.all([
-      api.topGames({ limit: 8 }),
-      api.mostReviewed({ limit: 8 }),
-      api.highlyRated({ limit: 8, minReviews: 100 }),
-    ])
-      .then(([t, r, h]) => {
-        if (!alive) return;
-        setTop(t.results);
-        setReviewed(r.results);
-        setHighlyRated(h.results);
+    setError(null);
+
+    api.topGames({ limit: 8 })
+      .then((data) => {
+        if (alive) setTop(data.results);
       })
       .catch((err) => {
         if (alive) setError(err);
       });
+
+    api.mostReviewed({ limit: 8 })
+      .then((data) => {
+        if (alive) setReviewed(data.results);
+      })
+      .catch((err) => {
+        if (alive) setError(err);
+      });
+
+    api.highlyRated({ limit: 8, minReviews: 100 })
+      .then((data) => {
+        if (alive) setHighlyRated(data.results);
+      })
+      .catch((err) => {
+        if (alive) setError(err);
+      });
+
     return () => {
       alive = false;
     };

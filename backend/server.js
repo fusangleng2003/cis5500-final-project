@@ -140,12 +140,11 @@ app.get('/api/games/most-reviewed', async (req, res) => {
                 g.year_published,
                 g.avg_rating,
                 g.num_voters,
-                COUNT(r.review_id)::int AS review_count,
-                AVG(r.rating)::float   AS avg_review_rating
+                grs.total_reviews::int AS review_count,
+                grs.avg_review_rating::float AS avg_review_rating
          FROM Game g
-         JOIN Review r ON g.game_id = r.game_id
-         GROUP BY g.game_id, g.name, g.thumbnail, g.year_published, g.avg_rating, g.num_voters
-         ORDER BY review_count DESC
+         JOIN game_review_stats grs ON g.game_id = grs.game_id
+         ORDER BY grs.total_reviews DESC
          LIMIT $1`,
         [limit],
       );
@@ -173,14 +172,13 @@ app.get('/api/games/highly-rated', async (req, res) => {
                 g.year_published,
                 g.avg_rating,
                 g.num_voters,
-                COUNT(r.review_id)::int                   AS review_count,
-                ROUND(AVG(r.rating)::numeric, 2)::float   AS avg_review_rating
+                grs.rated_reviews::int                    AS review_count,
+                ROUND(grs.avg_review_rating::numeric, 2)::float AS avg_review_rating
          FROM Game g
-         JOIN Review r ON g.game_id = r.game_id
-         WHERE r.rating IS NOT NULL
-         GROUP BY g.game_id, g.name, g.thumbnail, g.year_published, g.avg_rating, g.num_voters
-         HAVING COUNT(r.review_id) >= $1
-         ORDER BY avg_review_rating DESC, review_count DESC
+         JOIN game_review_stats grs ON g.game_id = grs.game_id
+         WHERE grs.rated_reviews >= $1
+           AND grs.avg_review_rating IS NOT NULL
+         ORDER BY grs.avg_review_rating DESC, grs.rated_reviews DESC
          LIMIT $2`,
         [minReviews, limit],
       );
